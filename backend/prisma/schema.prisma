@@ -1,0 +1,631 @@
+// ==============================================================================
+// SÈNÈ AGRICULTURAL PLATFORM - PRISMA DATABASE SCHEMA (POSTGRESQL)
+// ==============================================================================
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ==============================================================================
+// ENUMS
+// ==============================================================================
+
+enum UserRole {
+  ADMIN
+  AGENT
+  BUYER
+}
+
+enum BuyerType {
+  WHOLESALER
+  RESTAURANT
+  INDIVIDUAL
+  COOPERATIVE_BUYER
+}
+
+enum Gender {
+  FEMALE
+  MALE
+  OTHER
+}
+
+enum ProductCategory {
+  TUBER
+  CEREAL
+  VEGETABLE
+  FRUIT
+  LEGUME
+}
+
+enum QualityGrade {
+  GRADE_A      // Premium / First choice (calibrated, zero rot)
+  GRADE_B      // Standard commercial quality
+  STANDARD     // Mixed or secondary quality
+}
+
+enum UnitType {
+  SAC_50KG
+  SAC_25KG
+  CAISSE
+  KG
+  TONNE
+}
+
+enum SeasonType {
+  DRY_SEASON     // Saison sèche (Nov - Avril)
+  RAINY_SEASON   // Saison des pluies / Hivernage (Mai - Oct)
+}
+
+enum OfferStatus {
+  DRAFT
+  PUBLISHED
+  RESERVED
+  SOLD_OUT
+  EXPIRED
+  CANCELLED
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  COLLECTING
+  IN_TRANSIT
+  DELIVERED
+  COMPLETED
+  CANCELLED
+}
+
+enum DeliveryStatus {
+  SCHEDULED
+  COLLECTED_AT_VILLAGE
+  CORRIDOR_TRANSIT
+  ARRIVED_DESTINATION
+  HANDED_OVER
+  FAILED
+}
+
+enum PaymentMethod {
+  ORANGE_MONEY_GN
+  MTN_MOMO_GN
+  CASH_ON_DELIVERY
+}
+
+enum PaymentStatus {
+  PENDING
+  ESCROW_LOCKED
+  RELEASED_TO_PRODUCER
+  REFUNDED
+  FAILED
+}
+
+enum PayoutMethod {
+  ORANGE_MONEY_GN
+  MTN_MOMO_GN
+  CASH_IN_HAND
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  DISBURSED
+  FAILED
+}
+
+enum SyncMutationStatus {
+  PENDING
+  APPLIED
+  REJECTED
+  CONFLICT
+}
+
+enum NotificationChannel {
+  SMS
+  WHATSAPP
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+}
+
+// ==============================================================================
+// GEOGRAPHIC HIERARCHY (Guinea Administrative Structure)
+// Region > Prefecture > SubPrefecture > Village
+// ==============================================================================
+
+model Region {
+  id          String       @id @default(uuid())
+  code        String       @unique // e.g. "LABE", "BOKE", "KANKAN", "CONAKRY"
+  name        String
+  prefectures Prefecture[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([name])
+}
+
+model Prefecture {
+  id             String          @id @default(uuid())
+  code           String          @unique // e.g. "LAB", "DIN", "PIT"
+  name           String
+  regionId       String
+  region         Region          @relation(fields: [regionId], references: [id], onDelete: Cascade)
+  subPrefectures SubPrefecture[]
+  agentsAssigned User[]          @relation("AgentPrefectureAssignment")
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  @@index([regionId])
+  @@index([name])
+}
+
+model SubPrefecture {
+  id           String      @id @default(uuid())
+  code         String?
+  name         String      // e.g. "Timbi-Madina", "Dinguiraye-Centre", "Popodara"
+  prefectureId String
+  prefecture   Prefecture  @relation(fields: [prefectureId], references: [id], onDelete: Cascade)
+  villages     Village[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([prefectureId])
+  @@index([name])
+}
+
+model Village {
+  id              String        @id @default(uuid())
+  name            String
+  subPrefectureId String
+  subPrefecture   SubPrefecture @relation(fields: [subPrefectureId], references: [id], onDelete: Cascade)
+  latitude        Float?
+  longitude       Float?
+  landmarkNotes   String?       // Useful for logistics: "Near the grand mosquée", "5km after bridge"
+  producers       Producer[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([subPrefectureId])
+  @@index([name])
+}
+
+// ==============================================================================
+// USERS & SESSIONS (RBAC)
+// ==============================================================================
+
+model User {
+  id                    String        @id @default(uuid())
+  phone                 String        @unique // Guinean format: +224 6XX XX XX XX
+  email                 String?       @unique
+  passwordHash          String
+  role                  UserRole      @default(BUYER)
+  firstName             String
+  lastName              String
+  isActive              Boolean       @default(true)
+  avatarUrl             String?       // MinIO S3 object URL
+
+  // Agent Specific Fields
+  agentBadgeCode        String?       @unique // e.g. "AGT-2026-LAB-01"
+  assignedPrefectureId  String?
+  assignedPrefecture    Prefecture?   @relation("AgentPrefectureAssignment", fields: [assignedPrefectureId], references: [id])
+  registeredProducers   Producer[]    @relation("AgentRegisteredProducers")
+  publishedOffers       Offer[]       @relation("AgentPublishedOffers")
+  collectedDeliveries   Delivery[]    @relation("AgentCollectedDeliveries")
+  disbursedPayouts      ProducerPayout[] @relation("AgentDisbursedPayouts")
+  syncMutations         SyncMutationQueue[]
+
+  // Buyer Specific Fields
+  buyerType             BuyerType?
+  companyName           String?       // For restaurants or wholesalers
+  buyerOrders           Order[]       @relation("BuyerOrders")
+  reviewsWritten        Review[]      @relation("ReviewsWritten")
+
+  // Authentication & Audit
+  sessions              Session[]
+  auditLogs             AuditLog[]
+
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  @@index([phone])
+  @@index([role, isActive])
+  @@index([assignedPrefectureId])
+}
+
+model Session {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokenHash String
+  userAgent        String?
+  ipAddress        String?
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ==============================================================================
+// PRODUCERS (Rural Women Farmers & Households)
+// ==============================================================================
+
+model Producer {
+  id                  String       @id @default(uuid())
+  code                String       @unique // Human readable code: e.g. "PRD-LAB-0042"
+  firstName           String
+  lastName            String
+  phone               String?      // Simple feature phone or none
+  guardianName        String?      // Trusted relative/son/husband in village
+  guardianPhone       String?      // Phone number of guardian
+  gender              Gender       @default(FEMALE)
+  nationalIdNumber    String?
+  photoUrl            String?      // MinIO S3 URL of producer's photo taken by agent
+
+  // Location & Cooperative
+  villageId           String
+  village             Village      @relation(fields: [villageId], references: [id], onDelete: Restrict)
+  isCooperativeMember Boolean      @default(false)
+  cooperativeName     String?
+
+  // Farm Profile
+  farmSizeHectares    Float?       @default(0.5)
+  primaryCrops        String[]     // e.g. ["Pomme de terre", "Oignon"]
+
+  // Registration & Agent Ownership
+  registeredById      String
+  registeredBy        User         @relation("AgentRegisteredProducers", fields: [registeredById], references: [id], onDelete: Restrict)
+
+  // Credit Scoring Baseline & Track Record
+  salesHistoryCount   Int          @default(0)     // Total successful sales batches
+  totalEarningsGnf    BigInt       @default(0)     // Cumulative gross revenue in GNF
+  reliabilityScore    Float        @default(50.0)  // 0 to 100 rating based on fulfilled commitments
+
+  isActive            Boolean      @default(true)
+  offers              Offer[]
+  payouts             ProducerPayout[]
+  reviewsReceived     Review[]
+
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+
+  @@index([villageId])
+  @@index([registeredById])
+  @@index([code])
+  @@index([reliabilityScore])
+}
+
+// ==============================================================================
+// PRODUCT CATALOG (Crops & Harvest Seasons)
+// ==============================================================================
+
+model Product {
+  id           String          @id @default(uuid())
+  code         String          @unique // e.g. "POTATO_TIMBI", "FONIO_DINGUIRAYE", "TOMATO_KANKAN"
+  name         String          // e.g. "Pomme de terre (Belle de Guinée)"
+  category     ProductCategory @default(TUBER)
+  defaultUnit  UnitType        @default(SAC_50KG)
+  description  String?
+  iconUrl      String?         // MinIO S3 object URL
+  isActive     Boolean         @default(true)
+  offers       Offer[]
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@index([category])
+  @@index([isActive])
+}
+
+// ==============================================================================
+// OFFERS (Supply Lots Published by Local Agents)
+// ==============================================================================
+
+model Offer {
+  id                     String       @id @default(uuid())
+  offerNumber            String       @unique // e.g. "OFF-2026-0042"
+  producerId             String
+  producer               Producer     @relation(fields: [producerId], references: [id], onDelete: Restrict)
+  agentId                String
+  agent                  User         @relation("AgentPublishedOffers", fields: [agentId], references: [id], onDelete: Restrict)
+  productId              String
+  product                Product      @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  qualityGrade           QualityGrade @default(GRADE_A)
+  unit                   UnitType     @default(SAC_50KG)
+  quantityTotal          Int          // Total stock published
+  quantityAvailable      Int          // Remaining available stock
+  unitPriceGnf           BigInt       // Price per unit in GNF (e.g. 350000 GNF per 50kg bag)
+  minOrderQuantity       Int          @default(1)
+
+  harvestDate            DateTime?
+  availableFrom          DateTime     @default(now())
+  availableUntil         DateTime
+  villageCollectionPoint String       // Physical meeting place in village (e.g. "Magasin coopérative Timbi")
+
+  photos                 String[]     // Array of MinIO S3 image URLs
+  season                 SeasonType   @default(DRY_SEASON)
+  status                 OfferStatus  @default(PUBLISHED)
+
+  // Offline Synchronization Traceability
+  offlineActionId        String?      // Idempotency key from agent mobile app
+
+  orderItems             OrderItem[]
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+
+  @@index([producerId])
+  @@index([agentId])
+  @@index([productId])
+  @@index([status, availableUntil])
+  @@index([offlineActionId])
+}
+
+// ==============================================================================
+// ORDERS & ORDER ITEMS (Buyer Purchases)
+// ==============================================================================
+
+model Order {
+  id                    String        @id @default(uuid())
+  orderNumber           String        @unique // e.g. "CMD-2026-0189"
+  buyerId               String
+  buyer                 User          @relation("BuyerOrders", fields: [buyerId], references: [id], onDelete: Restrict)
+
+  status                OrderStatus   @default(PENDING)
+  totalAmountGnf        BigInt        // Total order amount in GNF paid by buyer
+  platformCommissionGnf BigInt        @default(0) // Platform fee in GNF
+  agentCommissionGnf    BigInt        @default(0) // Local agent remuneration
+  producerNetTotalGnf   BigInt        // Amount that goes to producers
+
+  deliveryAddress       String        // e.g. "Marché Madina, Hangar Légumes, Porte 4"
+  deliveryCity          String        @default("Conakry")
+  desiredDeliveryDate   DateTime?
+  notes                 String?
+
+  items                 OrderItem[]
+  deliveries            Delivery[]
+  payments              Payment[]
+  payouts               ProducerPayout[]
+  reviews               Review[]
+
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  @@index([buyerId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id           String    @id @default(uuid())
+  orderId      String
+  order        Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  offerId      String
+  offer        Offer     @relation(fields: [offerId], references: [id], onDelete: Restrict)
+
+  quantity     Int
+  unitPriceGnf BigInt
+  subtotalGnf  BigInt
+
+  createdAt    DateTime  @default(now())
+
+  @@index([orderId])
+  @@index([offerId])
+}
+
+// ==============================================================================
+// LOGISTICS & CORRIDOR DELIVERIES (Village -> Corridor -> Conakry)
+// ==============================================================================
+
+model Delivery {
+  id                    String         @id @default(uuid())
+  deliveryNumber        String         @unique // e.g. "LIV-2026-0089"
+  orderId               String
+  order                 Order          @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  // Local collection agent who weighs and validates harvest quality
+  agentCollectorId      String
+  agentCollector        User           @relation("AgentCollectedDeliveries", fields: [agentCollectorId], references: [id], onDelete: Restrict)
+
+  // Corridor Transporter & Truck Info
+  driverName            String?
+  driverPhone           String?
+  vehiclePlate          String?        // e.g. "RC-4589-B"
+
+  // Quality & Weight verification at village collection center
+  collectedWeightKg     Float?
+  verifiedGrade         QualityGrade?
+  weighbridgeTicketUrl  String?        // MinIO S3 photo of weighing receipt / ticket
+
+  // Checkpoints
+  corridorDepartureDate DateTime?
+  corridorArrivalDate   DateTime?
+  destinationPoint      String         // e.g. "Magasin Sènè Entag Nord"
+
+  status                DeliveryStatus @default(SCHEDULED)
+  handoverNotes         String?
+  receiverSignedAt      DateTime?
+  proofOfDeliveryUrl    String?        // MinIO S3 photo of signed receipt or buyer delivery photo
+
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  @@index([orderId])
+  @@index([agentCollectorId])
+  @@index([status])
+}
+
+// ==============================================================================
+// PAYMENTS & ESCROW (Buyer Side)
+// ==============================================================================
+
+model Payment {
+  id                    String        @id @default(uuid())
+  paymentReference      String        @unique // e.g. "PAY-2026-0045"
+  orderId               String
+  order                 Order         @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  method                PaymentMethod @default(ORANGE_MONEY_GN)
+  amountGnf             BigInt
+  status                PaymentStatus @default(PENDING)
+
+  // Escrow Lifecycle
+  escrowLockedAt        DateTime?
+  releasedAt            DateTime?
+
+  // Gateway specifics (Orange Money Guinea / MTN MoMo / Webhook metadata)
+  providerTransactionId String?       @unique
+  providerPayload       Json?
+
+  payouts               ProducerPayout[]
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  @@index([orderId])
+  @@index([status])
+  @@index([providerTransactionId])
+}
+
+// ==============================================================================
+// PRODUCER PAYOUTS (Settlement to Farmers minus Commission)
+// ==============================================================================
+
+model ProducerPayout {
+  id                 String       @id @default(uuid())
+  payoutReference    String       @unique // e.g. "OUT-2026-0045"
+  producerId         String
+  producer           Producer     @relation(fields: [producerId], references: [id], onDelete: Restrict)
+  orderId            String
+  order              Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  paymentId          String?
+  payment            Payment?     @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  grossAmountGnf     BigInt
+  platformFeeGnf     BigInt
+  agentFeeGnf        BigInt
+  netAmountGnf       BigInt       // Disbursed to farmer: gross - (platformFee + agentFee)
+
+  payoutMethod       PayoutMethod @default(CASH_IN_HAND)
+  recipientPhone     String?      // Phone number if Mobile Money
+  status             PayoutStatus @default(PENDING)
+  disbursedAt        DateTime?
+
+  // Offline Cash Handover verification by Agent
+  agentDisbursedById String?
+  agentDisbursedBy   User?        @relation("AgentDisbursedPayouts", fields: [agentDisbursedById], references: [id])
+  offlineReceiptCode String?      // Generated offline verification code
+  receiptPhotoUrl    String?      // MinIO S3 photo of handwritten signed discharge
+
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@index([producerId])
+  @@index([orderId])
+  @@index([status])
+}
+
+// ==============================================================================
+// REVIEWS & QUALITY RATINGS
+// ==============================================================================
+
+model Review {
+  id               String    @id @default(uuid())
+  orderId          String
+  order            Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  authorId         String
+  author           User      @relation("ReviewsWritten", fields: [authorId], references: [id], onDelete: Restrict)
+  targetProducerId String
+  targetProducer   Producer  @relation(fields: [targetProducerId], references: [id], onDelete: Restrict)
+
+  rating           Int       // 1 to 5 stars
+  comment          String?
+
+  createdAt        DateTime  @default(now())
+
+  @@index([orderId])
+  @@index([targetProducerId])
+}
+
+// ==============================================================================
+// OFFLINE SYNCHRONIZATION ACTION QUEUE (Agent Mobile App)
+// Idempotency, Conflict Resolution, Audit of Mobile Actions
+// ==============================================================================
+
+model SyncMutationQueue {
+  id                   String             @id @default(uuid())
+  idempotencyKey       String             @unique // UUID generated locally on Flutter Drift client
+  agentId              String
+  agent                User               @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  entityType           String             // "PRODUCER" | "OFFER" | "DELIVERY_CHECKPOINT" | "PAYOUT_RECEIPT"
+  actionType           String             // "CREATE" | "UPDATE"
+  payload              Json               // Complete snapshot of mobile mutation
+  status               SyncMutationStatus @default(PENDING)
+
+  serverVersion        Int                @default(1)
+  clientTimestamp      DateTime           // Offline device time
+  appliedAt            DateTime?
+
+  errorMessage         String?
+  conflictNotes        String?
+
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  @@index([agentId, status])
+  @@index([idempotencyKey])
+}
+
+// ==============================================================================
+// NOTIFICATIONS LOG (SMS & WhatsApp via Abstract Interfaces)
+// ==============================================================================
+
+model NotificationLog {
+  id                String              @id @default(uuid())
+  recipientPhone    String
+  channel           NotificationChannel @default(SMS)
+  templateCode      String              // e.g. "ORDER_CONFIRMED_BUYER", "HARVEST_COLLECTED_SMS"
+  message           String
+  status            NotificationStatus  @default(QUEUED)
+
+  providerName      String              // "ORANGE_SMS_GN", "META_WHATSAPP", "TWILIO"
+  providerMessageId String?
+  errorMessage      String?
+
+  sentAt            DateTime?
+  createdAt         DateTime            @default(now())
+
+  @@index([recipientPhone])
+  @@index([status])
+  @@index([channel])
+}
+
+// ==============================================================================
+// AUDIT LOG (Security & Compliance)
+// ==============================================================================
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String   // e.g. "PRODUCER_CREATED", "OFFER_MODIFIED", "PAYMENT_RELEASED"
+  entityName String   // e.g. "Order", "Producer", "Offer"
+  entityId   String
+  oldValues  Json?
+  newValues  Json?
+  ipAddress  String?
+  userAgent  String?
+
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+  @@index([entityName, entityId])
+  @@index([createdAt])
+}
+
